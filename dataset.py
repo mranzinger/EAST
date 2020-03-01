@@ -31,20 +31,20 @@ def move_points(vertices, index1, index2, r, coef):
 	y1_index = index1 * 2 + 1
 	x2_index = index2 * 2 + 0
 	y2_index = index2 * 2 + 1
-	
+
 	r1 = r[index1]
 	r2 = r[index2]
 	length_x = vertices[x1_index] - vertices[x2_index]
 	length_y = vertices[y1_index] - vertices[y2_index]
 	length = cal_distance(vertices[x1_index], vertices[y1_index], vertices[x2_index], vertices[y2_index])
-	if length > 1:	
+	if length > 1:
 		ratio = (r1 * coef) / length
-		vertices[x1_index] += ratio * (-length_x) 
-		vertices[y1_index] += ratio * (-length_y) 
+		vertices[x1_index] += ratio * (-length_x)
+		vertices[y1_index] += ratio * (-length_y)
 		ratio = (r2 * coef) / length
-		vertices[x2_index] += ratio * length_x 
+		vertices[x2_index] += ratio * length_x
 		vertices[y2_index] += ratio * length_y
-	return vertices	
+	return vertices
 
 
 def shrink_poly(vertices, coef=0.3):
@@ -84,7 +84,7 @@ def get_rotate_mat(theta):
 
 def rotate_vertices(vertices, theta, anchor=None):
 	'''rotate vertices around anchor
-	Input:	
+	Input:
 		vertices: vertices of text region <numpy.ndarray, (8,)>
 		theta   : angle in radian measure
 		anchor  : fixed position during rotation
@@ -126,7 +126,7 @@ def cal_error(vertices):
 	x1, y1, x2, y2, x3, y3, x4, y4 = vertices
 	err = cal_distance(x1, y1, x_min, y_min) + cal_distance(x2, y2, x_max, y_min) + \
           cal_distance(x3, y3, x_max, y_max) + cal_distance(x4, y4, x_min, y_max)
-	return err	
+	return err
 
 
 def find_min_rect_angle(vertices):
@@ -139,13 +139,13 @@ def find_min_rect_angle(vertices):
 	angle_interval = 1
 	angle_list = list(range(-90, 90, angle_interval))
 	area_list = []
-	for theta in angle_list: 
+	for theta in angle_list:
 		rotated = rotate_vertices(vertices, theta / 180 * math.pi)
 		x1, y1, x2, y2, x3, y3, x4, y4 = rotated
 		temp_area = (max(x1, x2, x3, x4) - min(x1, x2, x3, x4)) * \
                     (max(y1, y2, y3, y4) - min(y1, y2, y3, y4))
 		area_list.append(temp_area)
-	
+
 	sorted_area_index = sorted(list(range(len(area_list))), key=lambda k : area_list[k])
 	min_error = float('inf')
 	best_index = -1
@@ -178,10 +178,10 @@ def is_cross_text(start_loc, length, vertices):
 	for vertice in vertices:
 		p2 = Polygon(vertice.reshape((4,2))).convex_hull
 		inter = p1.intersection(p2).area
-		if 0.01 <= inter / p2.area <= 0.99: 
+		if 0.01 <= inter / p2.area <= 0.99:
 			return True
 	return False
-		
+
 
 def crop_img(img, vertices, labels, length):
 	'''crop img patches to obtain batch and augment
@@ -222,8 +222,8 @@ def crop_img(img, vertices, labels, length):
 	box = (start_w, start_h, start_w + length, start_h + length)
 	region = img.crop(box)
 	if new_vertices.size == 0:
-		return region, new_vertices	
-	
+		return region, new_vertices
+
 	new_vertices[:,[0,2,4,6]] -= start_w
 	new_vertices[:,[1,3,5,7]] -= start_h
 	return region, new_vertices
@@ -267,7 +267,7 @@ def adjust_height(img, vertices, ratio=0.2):
 	old_h = img.height
 	new_h = int(np.around(old_h * ratio_h))
 	img = img.resize((img.width, new_h), Image.BILINEAR)
-	
+
 	new_vertices = vertices.copy()
 	if vertices.size > 0:
 		new_vertices[:,[1,3,5,7]] = vertices[:,[1,3,5,7]] * (new_h / old_h)
@@ -308,29 +308,29 @@ def get_score_geo(img, vertices, labels, scale, length):
 	score_map   = np.zeros((int(img.height * scale), int(img.width * scale), 1), np.float32)
 	geo_map     = np.zeros((int(img.height * scale), int(img.width * scale), 5), np.float32)
 	ignored_map = np.zeros((int(img.height * scale), int(img.width * scale), 1), np.float32)
-	
+
 	index = np.arange(0, length, int(1/scale))
 	index_x, index_y = np.meshgrid(index, index)
 	ignored_polys = []
 	polys = []
-	
+
 	for i, vertice in enumerate(vertices):
 		if labels[i] == 0:
 			ignored_polys.append(np.around(scale * vertice.reshape((4,2))).astype(np.int32))
-			continue		
-		
+			continue
+
 		poly = np.around(scale * shrink_poly(vertice).reshape((4,2))).astype(np.int32) # scaled & shrinked
 		polys.append(poly)
 		temp_mask = np.zeros(score_map.shape[:-1], np.float32)
 		cv2.fillPoly(temp_mask, [poly], 1)
-		
+
 		theta = find_min_rect_angle(vertice)
 		rotate_mat = get_rotate_mat(theta)
-		
+
 		rotated_vertices = rotate_vertices(vertice, theta)
 		x_min, x_max, y_min, y_max = get_boundary(rotated_vertices)
 		rotated_x, rotated_y = rotate_all_pixels(rotate_mat, vertice[0], vertice[1], length)
-	
+
 		d1 = rotated_y - y_min
 		d1[d1<0] = 0
 		d2 = y_max - rotated_y
@@ -344,7 +344,7 @@ def get_score_geo(img, vertices, labels, scale, length):
 		geo_map[:,:,2] += d3[index_y, index_x] * temp_mask
 		geo_map[:,:,3] += d4[index_y, index_x] * temp_mask
 		geo_map[:,:,4] += theta * temp_mask
-	
+
 	cv2.fillPoly(ignored_map, ignored_polys, 1)
 	cv2.fillPoly(score_map, polys, 1)
 	return torch.Tensor(score_map).permute(2,0,1), torch.Tensor(geo_map).permute(2,0,1), torch.Tensor(ignored_map).permute(2,0,1)
@@ -366,7 +366,7 @@ def extract_vertices(lines):
 		labels.append(label)
 	return np.array(vertices), np.array(labels)
 
-	
+
 class custom_dataset(data.Dataset):
 	def __init__(self, img_path, gt_path, scale=0.25, length=512):
 		super(custom_dataset, self).__init__()
@@ -382,15 +382,14 @@ class custom_dataset(data.Dataset):
 		with open(self.gt_files[index], 'r') as f:
 			lines = f.readlines()
 		vertices, labels = extract_vertices(lines)
-		
+
 		img = Image.open(self.img_files[index])
-		img, vertices = adjust_height(img, vertices) 
+		img, vertices = adjust_height(img, vertices)
 		img, vertices = rotate_img(img, vertices)
-		img, vertices = crop_img(img, vertices, labels, self.length) 
+		img, vertices = crop_img(img, vertices, labels, self.length)
 		transform = transforms.Compose([transforms.ColorJitter(0.5, 0.5, 0.5, 0.25), \
                                         transforms.ToTensor(), \
                                         transforms.Normalize(mean=(0.5,0.5,0.5),std=(0.5,0.5,0.5))])
-		
+
 		score_map, geo_map, ignored_map = get_score_geo(img, vertices, labels, self.scale, self.length)
 		return transform(img), score_map, geo_map, ignored_map
-

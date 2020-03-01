@@ -1,12 +1,16 @@
+import logging
+
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 
 def get_dice_loss(gt_score, pred_score):
 	inter = torch.sum(gt_score * pred_score)
 	union = torch.sum(gt_score) + torch.sum(pred_score) + 1e-5
 	return 1. - (2 * inter / union)
-	 
+
 
 def get_geo_loss(gt_geo, pred_geo):
 	d1_gt, d2_gt, d3_gt, d4_gt, angle_gt = torch.split(gt_geo, 1, 1)
@@ -28,14 +32,17 @@ class Loss(nn.Module):
 		self.weight_angle = weight_angle
 
 	def forward(self, gt_score, pred_score, gt_geo, pred_geo, ignored_map):
-		if torch.sum(gt_score) < 1:
-			return torch.sum(pred_score + pred_geo) * 0
-		
+		num_ex = torch.sum(gt_score).clamp_min_(1)
+
 		classify_loss = get_dice_loss(gt_score, pred_score*(1-ignored_map))
 		iou_loss_map, angle_loss_map = get_geo_loss(gt_geo, pred_geo)
 
-		angle_loss = torch.sum(angle_loss_map*gt_score) / torch.sum(gt_score)
-		iou_loss = torch.sum(iou_loss_map*gt_score) / torch.sum(gt_score)
+		angle_loss = torch.sum(angle_loss_map*gt_score) / num_ex
+		iou_loss = torch.sum(iou_loss_map*gt_score) / num_ex
 		geo_loss = self.weight_angle * angle_loss + iou_loss
-		print('classify loss is {:.8f}, angle loss is {:.8f}, iou loss is {:.8f}'.format(classify_loss, angle_loss, iou_loss))
-		return geo_loss + classify_loss
+		#print('classify loss is {:.8f}, angle loss is {:.8f}, iou loss is {:.8f}'.format(classify_loss, angle_loss, iou_loss))
+		return geo_loss + classify_loss, {
+			'classify': classify_loss.detach().item(),
+			'angle': angle_loss.detach().item(),
+			'iou': iou_loss.detach().item(),
+		}
