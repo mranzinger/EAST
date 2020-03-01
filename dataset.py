@@ -1,3 +1,5 @@
+import logging
+
 from shapely.geometry import Polygon
 import numpy as np
 import cv2
@@ -7,6 +9,8 @@ import os
 import torch
 import torchvision.transforms as transforms
 from torch.utils import data
+
+logger = logging.getLogger(__name__)
 
 
 def cal_distance(x1, y1, x2, y2):
@@ -177,6 +181,8 @@ def is_cross_text(start_loc, length, vertices):
 	p1 = Polygon(a).convex_hull
 	for vertice in vertices:
 		p2 = Polygon(vertice.reshape((4,2))).convex_hull
+		if p2.area == 0:
+			continue
 		inter = p1.intersection(p2).area
 		if 0.01 <= inter / p2.area <= 0.99:
 			return True
@@ -361,9 +367,13 @@ def extract_vertices(lines):
 	labels = []
 	vertices = []
 	for line in lines:
-		vertices.append(list(map(int,line.rstrip('\n').lstrip('\ufeff').split(',')[:8])))
+		vertices.append(list(map(int,line.split(',')[:8])))
 		label = 0 if '###' in line else 1
 		labels.append(label)
+
+	if not labels:
+		vertices.append([0, 0, 10, 0, 10, 10, 0, 10])
+		labels.append(0)
 	return np.array(vertices), np.array(labels)
 
 
@@ -379,9 +389,16 @@ class custom_dataset(data.Dataset):
 		return len(self.img_files)
 
 	def __getitem__(self, index):
-		with open(self.gt_files[index], 'r') as f:
-			lines = f.readlines()
-		vertices, labels = extract_vertices(lines)
+		with open(self.gt_files[index], 'rb') as f:
+			text = f.read().decode('utf-8-sig').replace('\r\n', '\n')
+
+			lines = text.splitlines(keepends=False)
+
+		try:
+			vertices, labels = extract_vertices(lines)
+		except Exception as e:
+			logger.error(f'Failed to parse the ground truth file "{self.gt_files[index]}" due to error: {e}')
+			raise
 
 		img = Image.open(self.img_files[index])
 		img, vertices = adjust_height(img, vertices)

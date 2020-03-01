@@ -75,7 +75,7 @@ def train(train_img_path, train_gt_path, pths_path, results_path, batch_size, lr
 		model = DDP(model)
 		data_parallel = True
 
-	scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[epoch_iter//2], gamma=0.1)
+	scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[epoch_iter // 2, (epoch_iter * 4) // 5], gamma=0.1)
 
 	if rank == 0:
 		logger.info('Initializing Tensorboard')
@@ -88,6 +88,8 @@ def train(train_img_path, train_gt_path, pths_path, results_path, batch_size, lr
 
 	logger.info('Training')
 	model.train()
+
+	train_start_time = time.time()
 
 	step = 0
 	for epoch in range(epoch_iter):
@@ -119,7 +121,7 @@ def train(train_img_path, train_gt_path, pths_path, results_path, batch_size, lr
 			with amp.scale_loss(loss, optimizer) as loss_scaled:
 				loss_scaled.backward()
 			optimizer.step()
-			scheduler.step()
+
 
 			barrier()
 			time_meters['step_time'].add_sample(time.time() - start_time)
@@ -129,26 +131,35 @@ def train(train_img_path, train_gt_path, pths_path, results_path, batch_size, lr
 			for k, v in details.items():
 				loss_meters[k].add_sample(v)
 
-			if rank == 0 and step % 5 == 0:
-				times = { k: m.value() for k, m in time_meters.items() }
-				losses = { k: m.value() for k, m in loss_meters.items() }
+			if i % 10 == 0:
+				logger.info(f'\tStep [{i+1}/{len(train_loader)}]')
 
-				logger.info(f'Epoch is [{epoch+1}/{epoch_iter}], mini-batch is [{i+1}/{steps_per_epoch}], time consumption is {times}, batch_loss is {losses}')
-
-				for k, v in times.items():
-					writer.add_scalar(f'performance/{k}', v, step)
-				for k, v in losses.items():
-					writer.add_scalar(f'loss/{k}', v, step)
-				writer.add_scalar('learning_rate', optimizer.param_groups[0]['lr'], step)
 			start_time = time.time()
 			step += 1
+		scheduler.step()
 
-		logger.info('epoch_loss is {:.8f}, epoch_time is {:.8f}'.format(epoch_loss/int(file_num/batch_size), time.time()-epoch_time))
-		logger.info(time.asctime(time.localtime(time.time())))
-		logger.info('='*50)
-		if rank == 0 and (epoch + 1) % interval == 0:
-			state_dict = model.module.state_dict() if data_parallel else model.state_dict()
-			torch.save(state_dict, os.path.join(checkpoints_dir, 'model_epoch_{}.pth'.format(epoch+1)))
+		if rank == 0:
+			times = { k: m.value() for k, m in time_meters.items() }
+			losses = { k: m.value() for k, m in loss_meters.items() }
+
+			times['epoch'] = time.time() - epoch_time
+
+			logger.info(f'Epoch is [{epoch+1}/{epoch_iter}], time consumption is {times}, batch_loss is {losses}')
+
+			for k, v in times.items():
+				writer.add_scalar(f'performance/{k}', v, step)
+			for k, v in losses.items():
+				writer.add_scalar(f'loss/{k}', v, step)
+			writer.add_scalar('learning_rate', optimizer.param_groups[0]['lr'], step)
+
+			if (epoch + 1) % interval == 0:
+				state_dict = model.module.state_dict() if data_parallel else model.state_dict()
+				save_path = os.path.join(checkpoints_dir, 'model_epoch_{}.pth'.format(epoch+1))
+				logger.info(f'Saving checkpoint to "{save_path}"...')
+				torch.save(state_dict, save_path)
+				logger.info(f'Done')
+
+	logger.info(f'Finished training!!! Took {time.time()-train_start_time:0.3f} seconds!')
 
 
 def _main():
@@ -176,7 +187,7 @@ def _main():
 	lr             = 5e-4 * world_size
 	num_workers    = 8
 	epoch_iter     = 600
-	save_interval  = 5
+	save_interval  = 60
 	train(train_img_path, train_gt_path, pths_path, args.results, batch_size, lr, num_workers, epoch_iter, save_interval, args.opt)
 
 def main():

@@ -87,7 +87,7 @@ if __name__ == '__main__':
         'submit_job',
         '--cpu', str(10 * args.num_gpus),
         '--gpu', str(args.num_gpus),
-        '--partition', 'batch_32GB',
+        '--partition', 'batch',
         '--mounts', os.environ['MOUNTS'],
         '--workdir', dest_dir,
         '--image', docker_image,
