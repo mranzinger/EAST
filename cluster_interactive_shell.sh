@@ -1,6 +1,6 @@
 #!/bin/sh
 
-submit_job --cpu 80 --gpu 8 \
+submit_job --cpu 10 --gpu 1 \
            --partition 'batch' \
            --mounts "$MOUNTS" \
            --workdir "$SRC_DIR/EAST" \

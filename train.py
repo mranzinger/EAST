@@ -183,8 +183,8 @@ def _main():
 	# train_img_path = os.path.abspath('../ICDAR_2015/train_img')
 	# train_gt_path  = os.path.abspath('../ICDAR_2015/train_gt')
 	pths_path      = './pths'
-	batch_size     = 12
-	lr             = 5e-4 * world_size
+	batch_size     = 24
+	lr             = 1e-3 * world_size
 	num_workers    = 8
 	epoch_iter     = 600
 	save_interval  = 60
