@@ -87,12 +87,13 @@ if __name__ == '__main__':
         'submit_job',
         '--cpu', str(10 * args.num_gpus),
         '--gpu', str(args.num_gpus),
-        '--partition', 'batch',
+        '--partition', 'batch_32GB',
         '--mounts', os.environ['MOUNTS'],
         '--workdir', dest_dir,
         '--image', docker_image,
-        '--pre_timeout_signal', '30',
+        '--pre_timeout_signal', '60',
         '--coolname',
+        '--duration', '8',
         '-c', command_args
     ]
 

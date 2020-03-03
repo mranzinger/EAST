@@ -2,6 +2,7 @@ import argparse
 import os
 import time
 import logging
+import sys
 
 import numpy as np
 import torch
@@ -32,13 +33,25 @@ rank = 0
 world_size = 1
 
 
-def train(train_img_path, train_gt_path, pths_path, results_path, batch_size, lr, num_workers, epoch_iter, interval, opt_level):
+def train(train_img_path, train_gt_path, pths_path, results_path, batch_size,
+		  lr, num_workers, epoch_iter, interval,
+		  opt_level=0,
+		  checkpoint_path=None):
 	tensorboard_dir = os.path.join(results_path, 'logs')
 	checkpoints_dir = os.path.join(results_path, 'checkpoints')
 	if rank == 0:
 		os.makedirs(tensorboard_dir, exist_ok=True)
 		os.makedirs(checkpoints_dir, exist_ok=True)
 	barrier()
+
+	try:
+		logger.info('Importing AutoResume lib...')
+		from userlib.auto_resume import AutoResume as auto_resume
+		auto_resume.init()
+		logger.info('Success!')
+	except:
+		logger.info('Failed!')
+		auto_resume = None
 
 	file_num = len(os.listdir(train_img_path))
 	trainset = custom_dataset(train_img_path, train_gt_path)
@@ -69,19 +82,40 @@ def train(train_img_path, train_gt_path, pths_path, results_path, batch_size, lr
 
 	model, optimizer = amp.initialize(model, optimizer, opt_level=f'O{opt_level}')
 
+	start_epoch = 0
+	if auto_resume is not None:
+		auto_resume_details = auto_resume.get_resume_details()
+		if auto_resume_details is not None:
+			logger.info('Detected that this is a resumption of a previous job!')
+			checkpoint_path = auto_resume_details['CHECKPOINT_PATH']
+
+	if checkpoint_path:
+		logger.info(f'Loading checkpoint at path "{checkpoint_path}"...')
+		checkpoint = torch.load(checkpoint_path, map_location=f'cuda:{rank}')
+		model.load_state_dict(checkpoint['model'])
+		optimizer.load_state_dict(checkpoint['optimizer'])
+		amp.load_state_dict(checkpoint['amp_state'])
+		start_epoch = checkpoint['epoch']
+		logger.info('Done')
+
 	data_parallel = False
 	if torch.distributed.is_initialized():
 		logger.info(f'DataParallel: Using {torch.cuda.device_count()} devices!')
 		model = DDP(model)
 		data_parallel = True
 
-	scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[epoch_iter // 2, (epoch_iter * 4) // 5], gamma=0.1)
-
-	if rank == 0:
-		logger.info('Initializing Tensorboard')
-		writer = SummaryWriter(tensorboard_dir, purge_step=0)
+	for param_group in optimizer.param_groups:
+		param_group.setdefault('initial_lr', lr)
+	scheduler = lr_scheduler.MultiStepLR(optimizer,
+										 milestones=[epoch_iter // 2],
+										 gamma=0.1,
+										 last_epoch=start_epoch)
 
 	steps_per_epoch = len(train_loader)
+	step = steps_per_epoch * start_epoch
+	if rank == 0:
+		logger.info('Initializing Tensorboard')
+		writer = SummaryWriter(tensorboard_dir, purge_step=step)
 
 	loss_meters = MeterDict(reset_on_value=True)
 	time_meters = MeterDict(reset_on_value=True)
@@ -91,8 +125,7 @@ def train(train_img_path, train_gt_path, pths_path, results_path, batch_size, lr
 
 	train_start_time = time.time()
 
-	step = 0
-	for epoch in range(epoch_iter):
+	for epoch in range(start_epoch, epoch_iter):
 		if train_sampler is not None:
 			train_sampler.set_epoch(epoch)
 
@@ -122,7 +155,6 @@ def train(train_img_path, train_gt_path, pths_path, results_path, batch_size, lr
 				loss_scaled.backward()
 			optimizer.step()
 
-
 			barrier()
 			time_meters['step_time'].add_sample(time.time() - start_time)
 
@@ -138,6 +170,8 @@ def train(train_img_path, train_gt_path, pths_path, results_path, batch_size, lr
 			step += 1
 		scheduler.step()
 
+		term_requested = auto_resume is not None and auto_resume.termination_requested()
+
 		if rank == 0:
 			times = { k: m.value() for k, m in time_meters.items() }
 			losses = { k: m.value() for k, m in loss_meters.items() }
@@ -152,14 +186,59 @@ def train(train_img_path, train_gt_path, pths_path, results_path, batch_size, lr
 				writer.add_scalar(f'loss/{k}', v, step)
 			writer.add_scalar('learning_rate', optimizer.param_groups[0]['lr'], step)
 
-			if (epoch + 1) % interval == 0:
+			if term_requested or (epoch + 1) % interval == 0:
 				state_dict = model.module.state_dict() if data_parallel else model.state_dict()
+				optim_state = optimizer.state_dict()
+
 				save_path = os.path.join(checkpoints_dir, 'model_epoch_{}.pth'.format(epoch+1))
 				logger.info(f'Saving checkpoint to "{save_path}"...')
-				torch.save(state_dict, save_path)
+				torch.save({
+					'model': state_dict,
+					'optimizer': optim_state,
+					'amp_state': amp.state_dict(),
+					'epoch': epoch + 1,
+				}, save_path)
 				logger.info(f'Done')
 
+		if term_requested:
+			logger.warning('Termination requested! Exiting...')
+			if rank == 0:
+				auto_resume.request_resume(
+					user_dict={
+						'CHECKPOINT_PATH': save_path,
+						'EPOCH': epoch
+					}
+				)
+			break
+
 	logger.info(f'Finished training!!! Took {time.time()-train_start_time:0.3f} seconds!')
+
+def resolve_checkpoint_path(checkpoint_path):
+	if not checkpoint_path or os.path.isfile(checkpoint_path):
+		return checkpoint_path
+
+	if not os.path.isdir(checkpoint_path):
+		raise ValueError(f"The value for '{checkpoint_path}' is not valid!")
+
+	best_path = None
+	best_epoch = None
+	for fname in os.listdir(checkpoint_path):
+		try:
+			basename, ext = os.path.splitext(fname)
+			if ext != '.pth':
+				continue
+			epoch = int(basename.split('_')[2])
+			if best_epoch is None or epoch > best_epoch:
+				best_epoch = epoch
+				best_path = fname
+		except:
+			logger.warning(f'Invalid checkpoint file "{fname}". Error: {e}')
+
+	if best_path is None:
+		raise ValueError(f"No suitable checkpoints found in path: {checkpoint_path}")
+
+	return os.path.join(checkpoint_path, best_path)
+
 
 
 def _main():
@@ -173,6 +252,8 @@ def _main():
 						help='Where to store the training results.')
 	parser.add_argument('--opt', type=int, default=0,
 						help='The optimization level to use.')
+	parser.add_argument('--chk', type=str, required=False,
+						help='Resume training from a previously saved checkpoint.')
 
 	args = parser.parse_args()
 
@@ -183,12 +264,15 @@ def _main():
 	# train_img_path = os.path.abspath('../ICDAR_2015/train_img')
 	# train_gt_path  = os.path.abspath('../ICDAR_2015/train_gt')
 	pths_path      = './pths'
-	batch_size     = 24
-	lr             = 1e-3 * world_size
+	batch_size     = 24 if world_size == 1 else 12
+	lr             = 1e-3 if world_size == 1 else 5e-4 * world_size
 	num_workers    = 8
 	epoch_iter     = 600
-	save_interval  = 60
-	train(train_img_path, train_gt_path, pths_path, args.results, batch_size, lr, num_workers, epoch_iter, save_interval, args.opt)
+	save_interval  = 5
+	train(train_img_path, train_gt_path, pths_path,
+		  args.results, batch_size, lr, num_workers, epoch_iter, save_interval,
+		  opt_level=args.opt,
+		  checkpoint_path=resolve_checkpoint_path(args.chk))
 
 def main():
 	"""Entrypoint for the dist_run distributed mode."""
