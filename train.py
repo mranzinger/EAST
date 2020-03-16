@@ -33,10 +33,11 @@ rank = 0
 world_size = 1
 
 
-def train(train_img_path, train_gt_path, pths_path, results_path, batch_size,
+def train(train_ds_path, val_ds_path, pths_path, results_path, batch_size,
 		  lr, num_workers, epoch_iter, interval,
 		  opt_level=0,
-		  checkpoint_path=None):
+		  checkpoint_path=None,
+		  val_freq=10):
 	tensorboard_dir = os.path.join(results_path, 'logs')
 	checkpoints_dir = os.path.join(results_path, 'checkpoints')
 	if rank == 0:
@@ -53,23 +54,47 @@ def train(train_img_path, train_gt_path, pths_path, results_path, batch_size,
 		logger.info('Failed!')
 		auto_resume = None
 
-	file_num = len(os.listdir(train_img_path))
-	trainset = custom_dataset(train_img_path, train_gt_path)
+	trainset = custom_dataset(
+		os.path.join(train_ds_path, 'images'),
+		os.path.join(train_ds_path, 'gt'),
+	)
+
+	valset = custom_dataset(
+		os.path.join(val_ds_path, 'images'),
+		os.path.join(val_ds_path, 'gt'),
+		is_val=True
+	)
+
+	logger.info(f'World Size: {world_size}, Rank: {rank}')
 
 	if world_size > 1:
 		train_sampler = torch.utils.data.distributed.DistributedSampler(trainset)
+		val_sampler = torch.utils.data.distributed.DistributedSampler(valset, shuffle=False)
 	else:
 		train_sampler = None
+		val_sampler = None
 
 	worker_init = LoaderWorkerProcessInit(rank, 43)
-	train_loader = DataLoader(trainset,
-							  batch_size=batch_size,
-                              shuffle=train_sampler is None,
-							  sampler=train_sampler,
-							  num_workers=num_workers,
-							  pin_memory=True,
-							  drop_last=True,
-							  worker_init_fn=worker_init)
+	train_loader = DataLoader(
+		trainset,
+		batch_size=batch_size,
+		shuffle=train_sampler is None,
+		sampler=train_sampler,
+		num_workers=num_workers,
+		pin_memory=True,
+		drop_last=True,
+		worker_init_fn=worker_init
+	)
+	val_loader = DataLoader(
+		valset,
+		batch_size=batch_size,
+		shuffle=False,
+		sampler=val_sampler,
+		num_workers=num_workers,
+		pin_memory=True,
+		drop_last=True,
+		worker_init_fn=worker_init
+	)
 
 	criterion = Loss()
 	torch.cuda.set_device(rank)
@@ -118,6 +143,7 @@ def train(train_img_path, train_gt_path, pths_path, results_path, batch_size,
 		writer = SummaryWriter(tensorboard_dir, purge_step=step)
 
 	loss_meters = MeterDict(reset_on_value=True)
+	val_loss_meters = MeterDict(reset_on_value=True)
 	time_meters = MeterDict(reset_on_value=True)
 
 	logger.info('Training')
@@ -132,6 +158,8 @@ def train(train_img_path, train_gt_path, pths_path, results_path, batch_size,
 		epoch_loss = 0
 		epoch_time = time.time()
 		start_time = time.time()
+
+		model.train()
 
 		for i, batch in enumerate(train_loader):
 			optimizer.zero_grad()
@@ -200,6 +228,41 @@ def train(train_img_path, train_gt_path, pths_path, results_path, batch_size,
 				}, save_path)
 				logger.info(f'Done')
 
+		if epoch % val_freq == 0:
+			logger.info(f'Validating epoch {epoch+1}...')
+			model.eval()
+			val_loader.dataset.reset_random()
+			with torch.no_grad():
+				for i, batch in enumerate(val_loader):
+					batch = [
+						b.cuda(rank, non_blocking=True)
+						for b in batch
+					]
+
+					img, gt_score, gt_geo, ignored_map = batch
+					barrier()
+
+					pred_score, pred_geo = model(img)
+
+					loss, details = criterion(gt_score, pred_score, gt_geo, pred_geo, ignored_map)
+
+					barrier()
+
+					for k, v in details.items():
+						val_loss_meters[k].add_sample(v)
+
+			if rank == 0:
+				print_dict = dict()
+				for k, m in val_loss_meters.items():
+					t = torch.tensor(m.value(), device=f'cuda:{rank}', dtype=torch.float32)
+					if world_size > 1:
+						torch.distributed.reduce(t, 0)
+						t /= world_size
+					writer.add_scalar(f'val/loss/{k}', t.item(), step)
+					print_dict[k] = t.item()
+				logger.info(f'\tLoss: {print_dict}')
+				logger.info('Training')
+
 		if term_requested:
 			logger.warning('Termination requested! Exiting...')
 			if rank == 0:
@@ -246,8 +309,10 @@ def _main():
 	set_affinity(rank, log_values=True)
 
 	parser = argparse.ArgumentParser(description='EAST training!')
-	parser.add_argument('-d', '--dataset', type=str, required=True,
+	parser.add_argument('--train_dataset', type=str, required=True,
 						help='The path to the training dataset.')
+	parser.add_argument('--val_dataset', type=str, required=True,
+						help='The path to the validation dataset.')
 	parser.add_argument('--results', type=str, required=True,
 						help='Where to store the training results.')
 	parser.add_argument('--opt', type=int, default=0,
@@ -257,8 +322,8 @@ def _main():
 
 	args = parser.parse_args()
 
-	train_img_path = os.path.join(args.dataset, 'images')
-	train_gt_path = os.path.join(args.dataset, 'gt')
+	# train_img_path = os.path.join(args.dataset, 'images')
+	# train_gt_path = os.path.join(args.dataset, 'gt')
 
 
 	# train_img_path = os.path.abspath('../ICDAR_2015/train_img')
@@ -267,12 +332,14 @@ def _main():
 	batch_size     = 24 if world_size == 1 else 12
 	lr             = 1e-3 if world_size == 1 else 5e-4 * world_size
 	num_workers    = 8
-	epoch_iter     = 600
+	epoch_iter     = 300
+	val_freq	   = 10
 	save_interval  = 5
-	train(train_img_path, train_gt_path, pths_path,
+	train(args.train_dataset, args.val_dataset, pths_path,
 		  args.results, batch_size, lr, num_workers, epoch_iter, save_interval,
 		  opt_level=args.opt,
-		  checkpoint_path=resolve_checkpoint_path(args.chk))
+		  checkpoint_path=resolve_checkpoint_path(args.chk),
+		  val_freq=val_freq)
 
 def main():
 	"""Entrypoint for the dist_run distributed mode."""

@@ -16,6 +16,7 @@ import importlib
 import logging
 import logging.config
 import os
+import psutil
 import signal
 import sys
 
@@ -86,10 +87,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Distributed launcher for pytorch.")
     parser.add_argument('-n', '--nproc_per_node', type=int, default=-1,
                         help="The number of processes to launch.")
-    parser.add_argument('--master_addr', default='127.0.0.1', type=str,
-                        help="Master node's address.")
-    parser.add_argument('--master_port', default=29500, type=int,
-                        help="Master node's port.")
 
     # positional
     parser.add_argument("launch_script", type=str,
@@ -104,8 +101,6 @@ if __name__ == '__main__':
     if world_size == -1:
         world_size = torch.cuda.device_count()
 
-    os.environ['MASTER_ADDR'] = args.master_addr
-    os.environ['MASTER_PORT'] = str(args.master_port)
     os.environ['WORLD_SIZE'] = str(world_size)
     # Low level parallel constructs actually hurt the performance fairly significantly
     # because we already employ a high level of parallelism at higher API layers. So,

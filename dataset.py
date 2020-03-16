@@ -189,7 +189,7 @@ def is_cross_text(start_loc, length, vertices):
 	return False
 
 
-def crop_img(img, vertices, labels, length):
+def crop_img(img, vertices, labels, length, rand_gen: np.random.Generator):
 	'''crop img patches to obtain batch and augment
 	Input:
 		img         : PIL Image
@@ -222,8 +222,8 @@ def crop_img(img, vertices, labels, length):
 	cnt = 0
 	while flag and cnt < 1000:
 		cnt += 1
-		start_w = int(np.random.rand() * remain_w)
-		start_h = int(np.random.rand() * remain_h)
+		start_w = int(rand_gen.uniform() * remain_w)
+		start_h = int(rand_gen.uniform() * remain_h)
 		flag = is_cross_text([start_w, start_h], length, new_vertices[labels==1,:])
 	box = (start_w, start_h, start_w + length, start_h + length)
 	region = img.crop(box)
@@ -259,7 +259,7 @@ def rotate_all_pixels(rotate_mat, anchor_x, anchor_y, length):
 	return rotated_x, rotated_y
 
 
-def adjust_height(img, vertices, ratio=0.2):
+def adjust_height(img, vertices, ratio=0.2, is_val=False):
 	'''adjust height of image to aug data
 	Input:
 		img         : PIL Image
@@ -269,7 +269,10 @@ def adjust_height(img, vertices, ratio=0.2):
 		img         : adjusted PIL Image
 		new_vertices: adjusted vertices
 	'''
-	ratio_h = 1 + ratio * (np.random.rand() * 2 - 1)
+	if not is_val:
+		ratio_h = 1 + ratio * (np.random.rand() * 2 - 1)
+	else:
+		ratio_h = 1
 	old_h = img.height
 	new_h = int(np.around(old_h * ratio_h))
 	img = img.resize((img.width, new_h), Image.BILINEAR)
@@ -280,7 +283,7 @@ def adjust_height(img, vertices, ratio=0.2):
 	return img, new_vertices
 
 
-def rotate_img(img, vertices, angle_range=10):
+def rotate_img(img, vertices, angle_range=10, is_val=False):
 	'''rotate image [-10, 10] degree to aug data
 	Input:
 		img         : PIL Image
@@ -292,7 +295,10 @@ def rotate_img(img, vertices, angle_range=10):
 	'''
 	center_x = (img.width - 1) / 2
 	center_y = (img.height - 1) / 2
-	angle = angle_range * (np.random.rand() * 2 - 1)
+	if not is_val:
+		angle = angle_range * (np.random.rand() * 2 - 1)
+	else:
+		angle = 0
 	img = img.rotate(angle, Image.BILINEAR)
 	new_vertices = np.zeros(vertices.shape)
 	for i, vertice in enumerate(vertices):
@@ -378,15 +384,30 @@ def extract_vertices(lines):
 
 
 class custom_dataset(data.Dataset):
-	def __init__(self, img_path, gt_path, scale=0.25, length=512):
+	def __init__(self, img_path, gt_path, scale=0.25, length=512, is_val=False):
 		super(custom_dataset, self).__init__()
 		self.img_files = [os.path.join(img_path, img_file) for img_file in sorted(os.listdir(img_path))]
 		self.gt_files  = [os.path.join(gt_path, gt_file) for gt_file in sorted(os.listdir(gt_path))]
 		self.scale = scale
 		self.length = length
+		self.is_val = is_val
+
+		self.reset_random()
+
+		transform = []
+		if not self.is_val:
+			transform.append(transforms.ColorJitter(0.5, 0.5, 0.5, 0.25))
+		transform = transform + [
+			transforms.ToTensor(),
+            transforms.Normalize(mean=(0.5,0.5,0.5),std=(0.5,0.5,0.5))
+		]
+		self.transform = transforms.Compose(transform)
 
 	def __len__(self):
 		return len(self.img_files)
+
+	def reset_random(self):
+		self.rand_gen = np.random.default_rng(42 if self.is_val else None)
 
 	def __getitem__(self, index):
 		with open(self.gt_files[index], 'rb') as f:
@@ -401,12 +422,9 @@ class custom_dataset(data.Dataset):
 			raise
 
 		img = Image.open(self.img_files[index])
-		img, vertices = adjust_height(img, vertices)
-		img, vertices = rotate_img(img, vertices)
-		img, vertices = crop_img(img, vertices, labels, self.length)
-		transform = transforms.Compose([transforms.ColorJitter(0.5, 0.5, 0.5, 0.25), \
-                                        transforms.ToTensor(), \
-                                        transforms.Normalize(mean=(0.5,0.5,0.5),std=(0.5,0.5,0.5))])
+		img, vertices = adjust_height(img, vertices, is_val=self.is_val)
+		img, vertices = rotate_img(img, vertices, is_val=self.is_val)
+		img, vertices = crop_img(img, vertices, labels, self.length, self.rand_gen)
 
 		score_map, geo_map, ignored_map = get_score_geo(img, vertices, labels, self.scale, self.length)
-		return transform(img), score_map, geo_map, ignored_map
+		return self.transform(img), score_map, geo_map, ignored_map
