@@ -2,6 +2,7 @@ import argparse
 import os
 import time
 import logging
+import shutil
 import sys
 
 import numpy as np
@@ -19,7 +20,7 @@ from dataset import custom_dataset
 from model import EAST
 from loss import Loss
 from fast_data_loader import FastDataLoader
-from utils import barrier, LoaderWorkerProcessInit, configure_logging, set_affinity
+from utils import barrier, LoaderWorkerProcessInit, configure_logging, set_affinity, resolve_checkpoint_path
 from meter import MeterDict
 
 DataLoader = FastDataLoader
@@ -38,6 +39,8 @@ def train(train_ds_path, val_ds_path, pths_path, results_path, batch_size,
 		  opt_level=0,
 		  checkpoint_path=None,
 		  val_freq=10):
+	torch.cuda.set_device(rank)
+
 	tensorboard_dir = os.path.join(results_path, 'logs')
 	checkpoints_dir = os.path.join(results_path, 'checkpoints')
 	if rank == 0:
@@ -97,7 +100,7 @@ def train(train_ds_path, val_ds_path, pths_path, results_path, batch_size,
 	)
 
 	criterion = Loss()
-	torch.cuda.set_device(rank)
+
 	device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
 	model = EAST()
 	model.to(device)
@@ -151,6 +154,8 @@ def train(train_ds_path, val_ds_path, pths_path, results_path, batch_size,
 
 	train_start_time = time.time()
 
+	best_loss = 100
+
 	for epoch in range(start_epoch, epoch_iter):
 		if train_sampler is not None:
 			train_sampler.set_epoch(epoch)
@@ -200,6 +205,7 @@ def train(train_ds_path, val_ds_path, pths_path, results_path, batch_size,
 
 		term_requested = auto_resume is not None and auto_resume.termination_requested()
 
+		checkpoint_path = None
 		if rank == 0:
 			times = { k: m.value() for k, m in time_meters.items() }
 			losses = { k: m.value() for k, m in loss_meters.items() }
@@ -218,17 +224,17 @@ def train(train_ds_path, val_ds_path, pths_path, results_path, batch_size,
 				state_dict = model.module.state_dict() if data_parallel else model.state_dict()
 				optim_state = optimizer.state_dict()
 
-				save_path = os.path.join(checkpoints_dir, 'model_epoch_{}.pth'.format(epoch+1))
-				logger.info(f'Saving checkpoint to "{save_path}"...')
+				checkpoint_path = os.path.join(checkpoints_dir, 'model_epoch_{}.pth'.format(epoch+1))
+				logger.info(f'Saving checkpoint to "{checkpoint_path}"...')
 				torch.save({
 					'model': state_dict,
 					'optimizer': optim_state,
 					'amp_state': amp.state_dict(),
 					'epoch': epoch + 1,
-				}, save_path)
+				}, checkpoint_path)
 				logger.info(f'Done')
 
-		if epoch % val_freq == 0:
+		if (epoch + 1) % val_freq == 0:
 			logger.info(f'Validating epoch {epoch+1}...')
 			model.eval()
 			val_loader.dataset.reset_random()
@@ -245,23 +251,29 @@ def train(train_ds_path, val_ds_path, pths_path, results_path, batch_size,
 					pred_score, pred_geo = model(img)
 
 					loss, details = criterion(gt_score, pred_score, gt_geo, pred_geo, ignored_map)
+					details['global'] = loss.detach().item()
 
 					barrier()
 
 					for k, v in details.items():
 						val_loss_meters[k].add_sample(v)
 
-			if rank == 0:
-				print_dict = dict()
-				for k, m in val_loss_meters.items():
-					t = torch.tensor(m.value(), device=f'cuda:{rank}', dtype=torch.float32)
-					if world_size > 1:
-						torch.distributed.reduce(t, 0)
-						t /= world_size
+			print_dict = dict()
+			for k, m in val_loss_meters.items():
+				t = torch.tensor(m.value(), device=f'cuda:{rank}', dtype=torch.float32)
+				if world_size > 1:
+					torch.distributed.reduce(t, 0)
+					t /= world_size
+				if rank == 0:
 					writer.add_scalar(f'val/loss/{k}', t.item(), step)
-					print_dict[k] = t.item()
-				logger.info(f'\tLoss: {print_dict}')
-				logger.info('Training')
+				print_dict[k] = t.item()
+			logger.info(f'\tLoss: {print_dict}')
+			val_loss = print_dict['global']
+			if rank == 0 and val_loss < best_loss:
+				logger.info(f'This is the best model so far. New loss: {val_loss}, previous: {best_loss}')
+				best_loss = val_loss
+				shutil.copyfile(checkpoint_path, os.path.join(checkpoints_dir, 'best.pth'))
+			logger.info('Training')
 
 		if term_requested:
 			logger.warning('Termination requested! Exiting...')
@@ -276,31 +288,7 @@ def train(train_ds_path, val_ds_path, pths_path, results_path, batch_size,
 
 	logger.info(f'Finished training!!! Took {time.time()-train_start_time:0.3f} seconds!')
 
-def resolve_checkpoint_path(checkpoint_path):
-	if not checkpoint_path or os.path.isfile(checkpoint_path):
-		return checkpoint_path
 
-	if not os.path.isdir(checkpoint_path):
-		raise ValueError(f"The value for '{checkpoint_path}' is not valid!")
-
-	best_path = None
-	best_epoch = None
-	for fname in os.listdir(checkpoint_path):
-		try:
-			basename, ext = os.path.splitext(fname)
-			if ext != '.pth':
-				continue
-			epoch = int(basename.split('_')[2])
-			if best_epoch is None or epoch > best_epoch:
-				best_epoch = epoch
-				best_path = fname
-		except:
-			logger.warning(f'Invalid checkpoint file "{fname}". Error: {e}')
-
-	if best_path is None:
-		raise ValueError(f"No suitable checkpoints found in path: {checkpoint_path}")
-
-	return os.path.join(checkpoint_path, best_path)
 
 
 
@@ -319,6 +307,8 @@ def _main():
 						help='The optimization level to use.')
 	parser.add_argument('--chk', type=str, required=False,
 						help='Resume training from a previously saved checkpoint.')
+	parser.add_argument('--epochs', type=int, default=600,
+						help='The number of epochs to train for')
 
 	args = parser.parse_args()
 
@@ -332,11 +322,10 @@ def _main():
 	batch_size     = 24 if world_size == 1 else 12
 	lr             = 1e-3 if world_size == 1 else 5e-4 * world_size
 	num_workers    = 8
-	epoch_iter     = 300
 	val_freq	   = 10
 	save_interval  = 5
 	train(args.train_dataset, args.val_dataset, pths_path,
-		  args.results, batch_size, lr, num_workers, epoch_iter, save_interval,
+		  args.results, batch_size, lr, num_workers, args.epochs, save_interval,
 		  opt_level=args.opt,
 		  checkpoint_path=resolve_checkpoint_path(args.chk),
 		  val_freq=val_freq)

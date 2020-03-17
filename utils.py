@@ -198,3 +198,33 @@ class LoaderWorkerProcessInit:
         numpy.random.seed(seed)
 
         set_affinity(self.rank)
+
+def resolve_checkpoint_path(checkpoint_path, load_best=False):
+    if not checkpoint_path or os.path.isfile(checkpoint_path):
+        return checkpoint_path
+
+    if not os.path.isdir(checkpoint_path):
+        raise ValueError(f"The value for '{checkpoint_path}' is not valid!")
+
+    best_path = os.path.join(checkpoint_path, 'best.pth')
+    if os.path.isfile(best_path) and load_best:
+        return best_path
+
+    best_path = None
+    best_epoch = None
+    for fname in os.listdir(checkpoint_path):
+        try:
+            basename, ext = os.path.splitext(fname)
+            if ext != '.pth':
+                continue
+            epoch = int(basename.split('_')[2])
+            if best_epoch is None or epoch > best_epoch:
+                best_epoch = epoch
+                best_path = fname
+        except Exception as e:
+            logger.warning(f'Invalid checkpoint file "{fname}". Error: {e}')
+
+    if best_path is None:
+        raise ValueError(f"No suitable checkpoints found in path: {checkpoint_path}")
+
+    return os.path.join(checkpoint_path, best_path)

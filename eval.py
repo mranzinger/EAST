@@ -9,6 +9,8 @@ from detect import detect_dataset
 import numpy as np
 import shutil
 
+from utils import resolve_checkpoint_path
+
 
 def eval_model(model_name, test_img_path, submit_path, save_flag=True):
 	if os.path.exists(submit_path):
@@ -17,11 +19,11 @@ def eval_model(model_name, test_img_path, submit_path, save_flag=True):
 
 	device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 	model = EAST(False).to(device)
-	model.load_state_dict(torch.load(model_name))
+	model.load_state_dict(torch.load(model_name)['model'])
 	model.eval()
 
 	start_time = time.time()
-	#detect_dataset(model, device, test_img_path, submit_path)
+	detect_dataset(model, device, test_img_path, submit_path)
 	os.chdir(submit_path)
 	res = subprocess.getoutput('zip -q submit.zip *.txt')
 	print(res)
@@ -47,7 +49,10 @@ if __name__ == '__main__':
 	args = parser.parse_args()
 
 	#model_name = './pths/east_vgg16.pth'
-	model_name = args.model
+	model_name = resolve_checkpoint_path(args.model, load_best=True)
+
+	print(f'Using checkpoint: {model_name}')
+
 	#test_img_path = os.path.abspath('../ICDAR_2015/test_img')
 	submit_path = './submit'
 	eval_model(model_name, args.dataset, submit_path)

@@ -21,7 +21,7 @@ if __name__ == '__main__':
                         help="Resume the job with the source in the results dir.")
     parser.add_argument('--restart', default=False, action='store_true',
                         help="Allow the re-use of an existing results dir.")
-    parser.add_argument('-g', '--num_gpus', default=8, type=int,
+    parser.add_argument('-g', '--num_gpus', default=2, type=int,
                         help='The number of gpus to request')
 
     # Get the results directory without fussing with the rest
@@ -47,7 +47,7 @@ if __name__ == '__main__':
         print('Copying source code to "{}"...'.format(dest_dir))
         shutil.copytree(source_dir, dest_dir, symlinks=True,
             ignore=shutil.ignore_patterns('synthetic_data', 'logs', '.git*',
-                                        '__pycache__', '.vscode', '*.jpg', '*.png')
+                                        '__pycache__', '.vscode', '*.jpg', '*.png', '*.pth')
         )
         print('Done')
 
