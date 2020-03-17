@@ -47,7 +47,7 @@ if __name__ == '__main__':
         print('Copying source code to "{}"...'.format(dest_dir))
         shutil.copytree(source_dir, dest_dir, symlinks=True,
             ignore=shutil.ignore_patterns('synthetic_data', 'logs', '.git*',
-                                        '__pycache__', '.vscode', '*.jpg', '*.png', '*.pth')
+                                        '__pycache__', '.vscode', '*.jpg', '*.png')
         )
         print('Done')
 

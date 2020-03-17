@@ -127,6 +127,7 @@ def train(train_ds_path, val_ds_path, pths_path, results_path, batch_size,
 		logger.info('Done')
 
 	data_parallel = False
+	main_model = model
 	if torch.distributed.is_initialized():
 		logger.info(f'DataParallel: Using {torch.cuda.device_count()} devices!')
 		model = DDP(model)
@@ -221,7 +222,7 @@ def train(train_ds_path, val_ds_path, pths_path, results_path, batch_size,
 			writer.add_scalar('learning_rate', optimizer.param_groups[0]['lr'], step)
 
 			if term_requested or (epoch + 1) % interval == 0:
-				state_dict = model.module.state_dict() if data_parallel else model.state_dict()
+				state_dict = main_model.state_dict()
 				optim_state = optimizer.state_dict()
 
 				checkpoint_path = os.path.join(checkpoints_dir, 'model_epoch_{}.pth'.format(epoch+1))
@@ -299,7 +300,8 @@ def _main():
 	parser = argparse.ArgumentParser(description='EAST training!')
 	parser.add_argument('--train_dataset', type=str, required=True,
 						help='The path to the training dataset.')
-	parser.add_argument('--val_dataset', type=str, required=True,
+	parser.add_argument('--val_dataset', type=str,
+						default='/home/dcg-adlr-mranzinger-data.cosmos1100/scene-text/icdar/incidental_text/val',
 						help='The path to the validation dataset.')
 	parser.add_argument('--results', type=str, required=True,
 						help='Where to store the training results.')
