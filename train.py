@@ -2,6 +2,7 @@ import argparse
 import os
 import time
 import logging
+import math
 import shutil
 import sys
 
@@ -35,7 +36,7 @@ world_size = 1
 
 
 def train(train_ds_path, val_ds_path, pths_path, results_path, batch_size,
-		  lr, num_workers, epoch_iter, interval,
+		  lr, num_workers, train_iter, interval,
 		  opt_level=0,
 		  checkpoint_path=None,
 		  val_freq=10):
@@ -110,7 +111,7 @@ def train(train_ds_path, val_ds_path, pths_path, results_path, batch_size,
 
 	model, optimizer = amp.initialize(model, optimizer, opt_level=f'O{opt_level}')
 
-	start_epoch = 0
+	start_iter = 0
 	if auto_resume is not None:
 		auto_resume_details = auto_resume.get_resume_details()
 		if auto_resume_details is not None:
@@ -123,7 +124,7 @@ def train(train_ds_path, val_ds_path, pths_path, results_path, batch_size,
 		model.load_state_dict(checkpoint['model'])
 		optimizer.load_state_dict(checkpoint['optimizer'])
 		amp.load_state_dict(checkpoint['amp_state'])
-		start_epoch = checkpoint['epoch']
+		start_iter = checkpoint['iter']
 		logger.info('Done')
 
 	data_parallel = False
@@ -136,12 +137,14 @@ def train(train_ds_path, val_ds_path, pths_path, results_path, batch_size,
 	for param_group in optimizer.param_groups:
 		param_group.setdefault('initial_lr', lr)
 	scheduler = lr_scheduler.MultiStepLR(optimizer,
-										 milestones=[epoch_iter // 2],
+										 milestones=[train_iter // 2],
 										 gamma=0.1,
-										 last_epoch=start_epoch)
+										 last_epoch=start_iter)
 
 	steps_per_epoch = len(train_loader)
-	step = steps_per_epoch * start_epoch
+	step = start_iter
+	start_epoch = step // steps_per_epoch
+	epoch_iter = int(math.ceil(train_iter / steps_per_epoch))
 	if rank == 0:
 		logger.info('Initializing Tensorboard')
 		writer = SummaryWriter(tensorboard_dir, purge_step=step)
@@ -202,7 +205,10 @@ def train(train_ds_path, val_ds_path, pths_path, results_path, batch_size,
 
 			start_time = time.time()
 			step += 1
-		scheduler.step()
+			scheduler.step()
+
+			if step == train_iter:
+				break
 
 		term_requested = auto_resume is not None and auto_resume.termination_requested()
 
@@ -232,10 +238,11 @@ def train(train_ds_path, val_ds_path, pths_path, results_path, batch_size,
 					'optimizer': optim_state,
 					'amp_state': amp.state_dict(),
 					'epoch': epoch + 1,
+					'iter': step
 				}, checkpoint_path)
 				logger.info(f'Done')
 
-		if (epoch + 1) % val_freq == 0:
+		if (epoch + 1) % val_freq == 0 or step == train_iter:
 			logger.info(f'Validating epoch {epoch+1}...')
 			model.eval()
 			val_loader.dataset.reset_random()
@@ -298,19 +305,20 @@ def _main():
 	set_affinity(rank, log_values=True)
 
 	parser = argparse.ArgumentParser(description='EAST training!')
-	parser.add_argument('--train_dataset', type=str, required=True,
+	parser.add_argument('--train_dataset', type=str,
+						default='/home/dcg-adlr-mranzinger-data.cosmos1100/scene-text/icdar/incidental_text/train',
 						help='The path to the training dataset.')
 	parser.add_argument('--val_dataset', type=str,
-						default='/home/dcg-adlr-mranzinger-data.cosmos1100/scene-text/icdar/incidental_text/val',
+						default='/home/dcg-adlr-mranzinger-data.cosmos1100/scene-text/icdar/incidental_text/relabeled_val',
 						help='The path to the validation dataset.')
 	parser.add_argument('--results', type=str, required=True,
 						help='Where to store the training results.')
-	parser.add_argument('--opt', type=int, default=0,
+	parser.add_argument('--opt', type=int, default=2,
 						help='The optimization level to use.')
 	parser.add_argument('--chk', type=str, required=False,
 						help='Resume training from a previously saved checkpoint.')
-	parser.add_argument('--epochs', type=int, default=600,
-						help='The number of epochs to train for')
+	parser.add_argument('--iter', type=int, default=600000,
+						help='The number of iterations to train for')
 
 	args = parser.parse_args()
 
@@ -326,8 +334,11 @@ def _main():
 	num_workers    = 8
 	val_freq	   = 10
 	save_interval  = 5
+
+	num_iter = int(math.ceil(args.iter / (batch_size * world_size)))
+
 	train(args.train_dataset, args.val_dataset, pths_path,
-		  args.results, batch_size, lr, num_workers, args.epochs, save_interval,
+		  args.results, batch_size, lr, num_workers, num_iter, save_interval,
 		  opt_level=args.opt,
 		  checkpoint_path=resolve_checkpoint_path(args.chk),
 		  val_freq=val_freq)

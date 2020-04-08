@@ -10,16 +10,29 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='EAST Multi-Evaluation')
     parser.add_argument('--root', type=str,
                         default='/home/dcg-adlr-mranzinger-output.cosmos1101/east')
-    parser.add_argument('--dataset', type=str, default='/home/dcg-adlr-mranzinger-data.cosmos1100/scene-text/icdar/incidental_text/val/images',
+    parser.add_argument('--dataset', type=str, default='/home/dcg-adlr-mranzinger-data.cosmos1100/scene-text/icdar/incidental_text/relabeled_val',
                         help='Path to the images to test against')
 
     args = parser.parse_args()
 
     model = EAST(False)
 
-    for experiment in sorted(os.listdir(args.root)):
-        chk = resolve_checkpoint_path(os.path.join(args.root, experiment, 'checkpoints'), load_best=True)
+    paths = []
 
+    for dirpath, dirnames, filenames in os.walk(args.root):
+        for dirname in dirnames:
+            if dirname == 'checkpoints':
+                experiment = os.path.join(dirpath, dirname)
+
+                try:
+                    chk = resolve_checkpoint_path(experiment, load_best=True)
+                    paths.append(chk)
+                except:
+                    pass
+
+    paths.sort()
+
+    for chk in paths:
         print(f'Using checkpoint: {chk}')
 
         submit_path = './submit'

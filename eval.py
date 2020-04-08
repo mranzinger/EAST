@@ -12,7 +12,12 @@ import shutil
 from utils import resolve_checkpoint_path
 
 
-def eval_model(model, checkpoint, test_img_path, submit_path, save_flag=True):
+def eval_model(model, checkpoint, test_path, submit_path, save_flag=True):
+    test_img_path = os.path.join(test_path, 'images')
+    test_gt_path = os.path.join(test_path, 'gt')
+
+    proc_dir = os.getcwd()
+
     if os.path.exists(submit_path):
         shutil.rmtree(submit_path)
     os.mkdir(submit_path)
@@ -28,9 +33,12 @@ def eval_model(model, checkpoint, test_img_path, submit_path, save_flag=True):
     res = subprocess.getoutput('zip -q submit.zip *.txt')
     #print(res)
     shutil.move('submit.zip', '../submit.zip')
+    os.chdir(test_gt_path)
+    res = subprocess.getoutput('zip -q gt.zip *.txt')
+    shutil.move('gt.zip', os.path.join(proc_dir, 'gt.zip'))
     # res = subprocess.getoutput('mv submit.zip ../')
-    os.chdir('../')
-    res = subprocess.getoutput('python ./evaluate/script.py –g=./evaluate/gt.zip –s=./submit.zip')
+    os.chdir(proc_dir)
+    res = subprocess.getoutput('python ./evaluate/script.py –g=./gt.zip –s=./submit.zip')
     print(res)
     os.remove('./submit.zip')
     #print('eval time is {}'.format(time.time()-start_time))
@@ -43,7 +51,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='EAST Evaluation')
     parser.add_argument('--model', type=str, required=True,
                         help='Path to the model checkpoint')
-    parser.add_argument('--dataset', type=str, default='/home/dcg-adlr-mranzinger-data.cosmos1100/scene-text/icdar/incidental_text/val/images',
+    parser.add_argument('--dataset', type=str, default='/home/dcg-adlr-mranzinger-data.cosmos1100/scene-text/icdar/incidental_text/val',
                         help='Path to the images to test against')
 
     args = parser.parse_args()
