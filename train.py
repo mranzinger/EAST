@@ -141,7 +141,9 @@ def train(train_ds_path, val_ds_path, pths_path, results_path, batch_size,
 										 gamma=0.1,
 										 last_epoch=start_iter)
 
-	steps_per_epoch = len(train_loader)
+	# This allows us to change dataset size without affecting things such as validation frequency
+	steps_per_epoch = 1000 // (world_size * batch_size)
+
 	step = start_iter
 	start_epoch = step // steps_per_epoch
 	epoch_iter = int(math.ceil(train_iter / steps_per_epoch))
@@ -160,6 +162,14 @@ def train(train_ds_path, val_ds_path, pths_path, results_path, batch_size,
 
 	best_loss = 100
 
+	train_iter = [iter(train_loader)]
+	def get_batch():
+		try:
+			return next(train_iter[0])
+		except:
+			train_iter[0] = iter(train_loader)
+			return get_batch()
+
 	for epoch in range(start_epoch, epoch_iter):
 		if train_sampler is not None:
 			train_sampler.set_epoch(epoch)
@@ -170,7 +180,9 @@ def train(train_ds_path, val_ds_path, pths_path, results_path, batch_size,
 
 		model.train()
 
-		for i, batch in enumerate(train_loader):
+		for i in range(steps_per_epoch):
+			batch = get_batch()
+
 			optimizer.zero_grad()
 
 			batch = [
@@ -201,7 +213,7 @@ def train(train_ds_path, val_ds_path, pths_path, results_path, batch_size,
 				loss_meters[k].add_sample(v)
 
 			if i % 10 == 0:
-				logger.info(f'\tStep [{i+1}/{len(train_loader)}]')
+				logger.info(f'\tStep [{i+1}/{steps_per_epoch}]')
 
 			start_time = time.time()
 			step += 1
