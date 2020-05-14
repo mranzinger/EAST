@@ -10,7 +10,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='EAST Multi-Evaluation')
     parser.add_argument('--root', type=str,
                         default='/home/dcg-adlr-mranzinger-output.cosmos1101/east')
-    parser.add_argument('--dataset', type=str, default='/home/dcg-adlr-mranzinger-data.cosmos1100/scene-text/icdar/incidental_text/relabeled_val',
+    parser.add_argument('--dataset', type=str, default='/home/dcg-adlr-mranzinger-data.cosmos1100/scene-text/icdar/incidental_text/',
                         help='Path to the images to test against')
 
     args = parser.parse_args()
@@ -32,8 +32,11 @@ if __name__ == '__main__':
 
     paths.sort()
 
-    for chk in paths:
-        print(f'Using checkpoint: {chk}')
+    for dataset in ['val', 'relabeled_val']:
+        dataset = os.path.join(args.dataset, dataset)
+        print(f'\n\n----------------------\nDataset: {dataset}')
+        for chk in paths:
+            print(f'\nUsing checkpoint: {chk}')
 
-        submit_path = './submit'
-        eval_model(model, chk, args.dataset, submit_path)
+            submit_path = './submit'
+            eval_model(model, chk, dataset, submit_path)
